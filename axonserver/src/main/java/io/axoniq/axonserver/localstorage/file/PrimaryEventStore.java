@@ -9,14 +9,15 @@
 
 package io.axoniq.axonserver.localstorage.file;
 
+import io.axoniq.axonserver.config.FileSystemMonitor;
 import io.axoniq.axonserver.exception.ErrorCode;
 import io.axoniq.axonserver.exception.MessagingPlatformException;
-import io.axoniq.axonserver.localstorage.EventTypeContext;
-import io.axoniq.axonserver.localstorage.SerializedEvent;
-import io.axoniq.axonserver.localstorage.SerializedEventWithToken;
-import io.axoniq.axonserver.localstorage.StorageCallback;
 import io.axoniq.axonserver.localstorage.transformation.EventTransformer;
 import io.axoniq.axonserver.localstorage.transformation.EventTransformerFactory;
+import io.axoniq.axonserver.grpc.event.Event;
+import io.axoniq.axonserver.localstorage.EventTypeContext;
+import io.axoniq.axonserver.localstorage.SerializedEventWithToken;
+import io.axoniq.axonserver.localstorage.StorageCallback;
 import io.axoniq.axonserver.localstorage.transformation.ProcessedEvent;
 import io.axoniq.axonserver.localstorage.transformation.WrappedEvent;
 import io.axoniq.axonserver.metric.MeterFactory;
@@ -33,6 +34,7 @@ import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
@@ -65,6 +67,7 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
     //
     protected final ConcurrentNavigableMap<Long, ByteBufferEventSource> readBuffers = new ConcurrentSkipListMap<>();
     protected EventTransformer eventTransformer;
+    protected final FileSystemMonitor fileSystemMonitor;
 
     /**
      * @param context                 the context and the content type (events or snapshots)
@@ -72,12 +75,15 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
      * @param eventTransformerFactory the transformer factory
      * @param storageProperties       configuration of the storage engine
      * @param meterFactory            factory to create metrics meters
+     * @param fileSystemMonitor
      */
     public PrimaryEventStore(EventTypeContext context, IndexManager indexManager,
                              EventTransformerFactory eventTransformerFactory, StorageProperties storageProperties,
-                             MeterFactory meterFactory) {
-        super(context, indexManager, storageProperties, meterFactory);
+                             SegmentBasedEventStore completedSegmentsHandler,
+                             MeterFactory meterFactory, FileSystemMonitor fileSystemMonitor) {
+        super(context, indexManager, storageProperties, completedSegmentsHandler, meterFactory);
         this.eventTransformerFactory = eventTransformerFactory;
+        this.fileSystemMonitor = fileSystemMonitor;
         synchronizer = new Synchronizer(context, storageProperties, this::completeSegment);
     }
 
@@ -86,25 +92,35 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
         File storageDir = new File(storageProperties.getStorage(context));
         FileUtils.checkCreateDirectory(storageDir);
         indexManager.init();
-        eventTransformer = eventTransformerFactory.get(VERSION, storageProperties.getFlags());
+        eventTransformer = eventTransformerFactory.get(storageProperties.getFlags());
         initLatestSegment(lastInitialized, Long.MAX_VALUE, storageDir, defaultFirstIndex);
+
+        fileSystemMonitor.registerPath(storageDir.toPath());
     }
 
     private void initLatestSegment(long lastInitialized, long nextToken, File storageDir, long defaultFirstIndex) {
         long first = getFirstFile(lastInitialized, storageDir, defaultFirstIndex);
         renameFileIfNecessary(first);
+        first = firstSegmentIfLatestCompleted(first);
+        if (next != null) {
+            next.initSegments(first);
+        }
         WritableEventSource buffer = getOrOpenDatafile(first);
         indexManager.remove(first);
         long sequence = first;
+        Map<String, List<IndexEntry>> loadedEntries = new HashMap<>();
         try (EventByteBufferIterator iterator = new EventByteBufferIterator(buffer, first, first)) {
             while (sequence < nextToken && iterator.hasNext()) {
                 EventInformation event = iterator.next();
                 if (event.isDomainEvent()) {
-                    indexManager.addToActiveSegment(first, event.getEvent().getAggregateIdentifier(), new IndexEntry(
+                    IndexEntry indexEntry = new IndexEntry(
                             event.getEvent().getAggregateSequenceNumber(),
                             event.getPosition(),
                             sequence
-                    ));
+                    );
+                    loadedEntries.computeIfAbsent(event.getEvent().getAggregateIdentifier(),
+                                                  aggregateId -> new LinkedList<>())
+                                 .add(indexEntry);
                 }
                 sequence++;
             }
@@ -116,13 +132,14 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
                         pendingEvents.size());
                 for (EventInformation event : pendingEvents) {
                     if (event.isDomainEvent()) {
-                        indexManager.addToActiveSegment(first,
-                                                        event.getEvent().getAggregateIdentifier(),
-                                                        new IndexEntry(
-                                                                event.getEvent().getAggregateSequenceNumber(),
-                                                                event.getPosition(),
-                                                                sequence
-                                                        ));
+                        IndexEntry indexEntry = new IndexEntry(
+                                event.getEvent().getAggregateSequenceNumber(),
+                                event.getPosition(),
+                                sequence
+                        );
+                        loadedEntries.computeIfAbsent(event.getEvent().getAggregateIdentifier(),
+                                                      aggregateId -> new LinkedList<>())
+                                     .add(indexEntry);
                     }
                     sequence++;
                 }
@@ -130,14 +147,30 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
             lastToken.set(sequence - 1);
         }
 
+        indexManager.addToActiveSegment(first, loadedEntries);
+
         buffer.putInt(buffer.position(), 0);
         WritePosition writePosition = new WritePosition(sequence, buffer.position(), buffer, first);
         writePositionRef.set(writePosition);
         synchronizer.init(writePosition);
+    }
 
-        if (next != null) {
-            next.initSegments(first);
+    private long firstSegmentIfLatestCompleted(long latestSegment) {
+        if (!indexManager.validIndex(latestSegment)) {
+            return latestSegment;
         }
+        WritableEventSource buffer = getOrOpenDatafile(latestSegment);
+        long token = latestSegment;
+        try (EventByteBufferIterator iterator = new EventByteBufferIterator(buffer, latestSegment, latestSegment)) {
+            while (iterator.hasNext()) {
+                iterator.next();
+                token++;
+            }
+        } finally {
+            readBuffers.remove(latestSegment);
+            buffer.close();
+        }
+        return token;
     }
 
     private long getFirstFile(long lastInitialized, File events, long defaultFirstIndex) {
@@ -150,7 +183,7 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
                      .orElse(defaultFirstIndex);
     }
 
-    private FilePreparedTransaction prepareTransaction(List<SerializedEvent> origEventList) {
+    private FilePreparedTransaction prepareTransaction(List<Event> origEventList) {
         List<ProcessedEvent> eventList = origEventList.stream().map(s -> new WrappedEvent(s, eventTransformer)).collect(
                 Collectors.toList());
         int eventSize = eventBlockSize(eventList);
@@ -165,7 +198,7 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
      * @return completable future with the token of the first event
      */
     @Override
-    public CompletableFuture<Long> store(List<SerializedEvent> events) {
+    public CompletableFuture<Long> store(List<Event> events) {
 
         CompletableFuture<Long> completableFuture = new CompletableFuture<>();
         try {
@@ -208,6 +241,9 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
 
     @Override
     public void close(boolean deleteData) {
+        File storageDir = new File(storageProperties.getStorage(context));
+        fileSystemMonitor.unregisterPath(storageDir.toPath());
+
         synchronizer.shutdown(true);
         readBuffers.forEach((s, source) -> {
             source.clean(0);
@@ -218,7 +254,6 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
 
         indexManager.cleanup(deleteData);
         if (deleteData) {
-            File storageDir = new File(storageProperties.getStorage(context));
             storageDir.delete();
         }
         closeListeners.forEach(Runnable::run);
@@ -342,7 +377,9 @@ public class PrimaryEventStore extends SegmentBasedEventStore {
                 logger.debug("Handed over {}, remaining segments: {}",
                              writePosition.segment,
                              getSegments());
-                source.clean(storageProperties.getPrimaryCleanupDelay());
+                if (source != null) {
+                    source.clean(storageProperties.getPrimaryCleanupDelay());
+                }
             });
         }
     }

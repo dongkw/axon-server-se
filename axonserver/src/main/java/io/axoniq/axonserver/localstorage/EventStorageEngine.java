@@ -9,10 +9,13 @@
 
 package io.axoniq.axonserver.localstorage;
 
+import io.axoniq.axonserver.grpc.event.Event;
 import io.axoniq.axonserver.grpc.event.EventWithToken;
+import org.springframework.boot.actuate.autoconfigure.system.DiskSpaceHealthIndicatorProperties;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.data.util.CloseableIterator;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -51,7 +54,7 @@ public interface EventStorageEngine {
      * @param eventList list of events
      * @return completable future containing the token of the first stored event
      */
-    default CompletableFuture<Long> store(List<SerializedEvent> eventList) {
+    default CompletableFuture<Long> store(List<Event> eventList) {
         CompletableFuture<Long> completableFuture = new CompletableFuture<>();
         completableFuture.completeExceptionally(new UnsupportedOperationException("Store operation not supported"));
         return completableFuture;
@@ -180,13 +183,6 @@ public interface EventStorageEngine {
     long getTokenAt(long instant);
 
     /**
-     * Adds information to the actuator health endpoint for this event store.
-     * @param builder actuator health builder
-     */
-    default void health(Health.Builder builder) {
-    }
-
-    /**
      * Rolls back storage engine to token. Implementations may keep more when token is not at a transaction boundary.
      * @param token the last token to keep.
      */
@@ -210,6 +206,7 @@ public interface EventStorageEngine {
 
     /**
      * Returns the next token that will be used by the event store. Does not change the token.
+     *
      * @return the next token
      */
     long nextToken();
@@ -218,4 +215,17 @@ public interface EventStorageEngine {
      * Deletes all event data in the Event Store (Only intended for development environments).
      */
     void deleteAllEventData();
+
+
+    /**
+     * Validates that the transaction that is stored at the given {@code token} is the same as the
+     * provided events. Throws an {@link io.axoniq.axonserver.exception.EventStoreValidationException} exception when
+     * there is a difference.
+     *
+     * @param token     the token of the first event in the transaction
+     * @param eventList the list of events
+     */
+    default void validateTransaction(long token, List<SerializedEvent> eventList) {
+    }
+
 }

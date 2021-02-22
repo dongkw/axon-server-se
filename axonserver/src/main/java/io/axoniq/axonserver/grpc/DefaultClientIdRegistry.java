@@ -71,7 +71,7 @@ public class DefaultClientIdRegistry implements ClientIdRegistry {
 
     @Override
     public Set<String> streamIdsFor(String clientId, ConnectionType type) {
-        Map<String, String> connectionTypeMap = clientIdMapPerType.computeIfAbsent(type, t -> Collections.emptyMap());
+        Map<String, String> connectionTypeMap = clientIdMapPerType.getOrDefault(type, Collections.emptyMap());
         Set<String> current = connectionTypeMap.entrySet()
                                                .stream()
                                                .filter(e -> e.getValue().equals(clientId))
@@ -126,7 +126,7 @@ public class DefaultClientIdRegistry implements ClientIdRegistry {
         String clientId = event.getQueryHandler().getClientId();
         String clientStreamId = event.clientIdentification().getClientStreamId();
         if (!clientIdMapPerType.getOrDefault(QUERY, Collections.emptyMap()).containsKey(clientStreamId)) {
-            logger.info("Command stream connected: {} [stream id -> {}]", clientId, clientStreamId);
+            logger.info("Query stream connected: {} [stream id -> {}]", clientId, clientStreamId);
         }
         register(clientStreamId, clientId, QUERY);
     }

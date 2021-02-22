@@ -10,6 +10,7 @@
 package io.axoniq.axonserver.localstorage.file;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -20,7 +21,7 @@ import java.util.List;
  */
 public class StandardIndexEntries implements IndexEntries {
 
-    protected final List<Integer> entries;
+    private final AppendOnlyList<Integer> entries;
     private final long firstSequenceNumber;
 
     /**
@@ -28,7 +29,7 @@ public class StandardIndexEntries implements IndexEntries {
      * @param firstSequenceNumber first sequence number
      */
     public StandardIndexEntries(long firstSequenceNumber) {
-        this(firstSequenceNumber, new ArrayList<>());
+        this(firstSequenceNumber, Collections.emptyList());
     }
 
     /**
@@ -37,8 +38,7 @@ public class StandardIndexEntries implements IndexEntries {
      * @param entries the positions of the aggregate
      */
     public StandardIndexEntries(long firstSequenceNumber, List<Integer> entries) {
-
-        this.entries = entries;
+        this.entries = new AppendOnlyList<>(entries);
         this.firstSequenceNumber = firstSequenceNumber;
     }
 
@@ -73,10 +73,12 @@ public class StandardIndexEntries implements IndexEntries {
             return this;
         }
         List<Integer> reducedEntries = new ArrayList<>();
-        for (int i = 0; i < entries.size(); i++) {
-            if (firstSequenceNumber + i >= minSequenceNumber && firstSequenceNumber + i < maxSequenceNumber) {
-                reducedEntries.add(entries.get(i));
+        long i = firstSequenceNumber;
+        for (Integer entry : entries) {
+            if (i >= minSequenceNumber && i < maxSequenceNumber) {
+                reducedEntries.add(entry);
             }
+            i++;
         }
         return new StandardIndexEntries(Math.max(minSequenceNumber, firstSequenceNumber), reducedEntries);
     }
@@ -97,7 +99,7 @@ public class StandardIndexEntries implements IndexEntries {
         if (isEmpty()) {
             return -1;
         }
-        return entries.get(entries.size() - 1);
+        return entries.last();
     }
 
     /**
@@ -118,7 +120,11 @@ public class StandardIndexEntries implements IndexEntries {
      */
     @Override
     public void add(IndexEntry indexEntry) {
-        entries.add(indexEntry.getPosition());
+        add(indexEntry.getPosition());
+    }
+
+    public void add(Integer position) {
+        entries.add(position);
     }
 
     @Override

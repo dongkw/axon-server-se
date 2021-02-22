@@ -9,6 +9,7 @@
 
 package io.axoniq.axonserver.localstorage;
 
+import io.axoniq.axonserver.interceptor.NoOpEventInterceptors;
 import io.axoniq.axonserver.exception.ErrorCode;
 import io.axoniq.axonserver.exception.MessagingPlatformException;
 import io.axoniq.axonserver.grpc.event.Confirmation;
@@ -48,14 +49,14 @@ public class LocalEventStorageEngineTest {
     public void setup() {
         StorageTransactionManagerFactory transactionManagerFactory = eventStore -> new StorageTransactionManager() {
             @Override
-            public CompletableFuture<Long> store(List<SerializedEvent> eventList) {
+            public CompletableFuture<Long> store(List<Event> eventList) {
                 CompletableFuture<Long> pendingTransaction = new CompletableFuture<>();
                 pendingTransactions.add(pendingTransaction);
                 return pendingTransaction;
             }
 
             @Override
-            public Runnable reserveSequenceNumbers(List<SerializedEvent> eventList) {
+            public Runnable reserveSequenceNumbers(List<Event> eventList) {
                 return () -> {
                 };
             }
@@ -82,7 +83,9 @@ public class LocalEventStorageEngineTest {
                 return new FakeEventStore(EventType.SNAPSHOT);
             }
         }, new MeterFactory(new SimpleMeterRegistry(), new DefaultMetricCollector()),
-                                          transactionManagerFactory, new DefaultEventDecorator(), 5, 1000, 10);
+                                          transactionManagerFactory,
+                                          new NoOpEventInterceptors(),
+                                          new DefaultEventDecorator(), 5, 1000, 10, 10);
         testSubject.initContext(SAMPLE_CONTEXT, false);
         testSubject.start();
     }
@@ -93,22 +96,22 @@ public class LocalEventStorageEngineTest {
     }
 
     @Test
-    public void cancel() {
+    public void cancel() throws InterruptedException {
         FakeStreamObserver<Confirmation> fakeStreamObserver = new FakeStreamObserver<>();
-        StreamObserver<InputStream> connection = testSubject.createAppendEventConnection(SAMPLE_CONTEXT,
+        StreamObserver<InputStream> connection = testSubject.createAppendEventConnection(SAMPLE_CONTEXT, null,
                                                                                          fakeStreamObserver);
         connection.onNext(new ByteArrayInputStream(Event.newBuilder().build().toByteArray()));
         connection.onCompleted();
 
+        assertWithin(100, TimeUnit.MILLISECONDS, () -> assertEquals(1, pendingTransactions.size()));
         testSubject.cancel(SAMPLE_CONTEXT);
-        assertEquals(1, pendingTransactions.size());
         assertFalse(fakeStreamObserver.errors().isEmpty());
         assertTrue(pendingTransactions.get(0).isDone());
     }
 
     @Test
     public void appendSnapshot() throws InterruptedException, TimeoutException, ExecutionException {
-        CompletableFuture<Confirmation> snapshot = testSubject.appendSnapshot(SAMPLE_CONTEXT,
+        CompletableFuture<Confirmation> snapshot = testSubject.appendSnapshot(SAMPLE_CONTEXT, null,
                                                                               Event.newBuilder()
                                                                                    .setAggregateIdentifier(
                                                                                            "AGGREGATE_WITH_ONE_EVENT")
@@ -122,7 +125,7 @@ public class LocalEventStorageEngineTest {
 
     @Test
     public void appendSnapshotFailsWhenNoEventsFound() throws InterruptedException, TimeoutException {
-        CompletableFuture<Confirmation> snapshot = testSubject.appendSnapshot(SAMPLE_CONTEXT,
+        CompletableFuture<Confirmation> snapshot = testSubject.appendSnapshot(SAMPLE_CONTEXT, null,
                                                                               Event.newBuilder()
                                                                                    .setAggregateIdentifier(
                                                                                            "AGGREGATE_WITH_NO_EVENTS")
@@ -140,14 +143,14 @@ public class LocalEventStorageEngineTest {
     }
 
     @Test
-    public void createAppendEventConnection() {
+    public void createAppendEventConnection() throws InterruptedException {
         FakeStreamObserver<Confirmation> fakeStreamObserver = new FakeStreamObserver<>();
-        StreamObserver<InputStream> connection = testSubject.createAppendEventConnection(SAMPLE_CONTEXT,
+        StreamObserver<InputStream> connection = testSubject.createAppendEventConnection(SAMPLE_CONTEXT, null,
                                                                                          fakeStreamObserver);
         connection.onNext(new ByteArrayInputStream(Event.newBuilder().build().toByteArray()));
         connection.onCompleted();
 
-        assertEquals(1, pendingTransactions.size());
+        assertWithin(100, TimeUnit.MILLISECONDS, () -> assertEquals(1, pendingTransactions.size()));
         pendingTransactions.get(0).complete(100L);
         assertTrue(fakeStreamObserver.errors().isEmpty());
         assertEquals(1, fakeStreamObserver.values().size());
@@ -158,6 +161,7 @@ public class LocalEventStorageEngineTest {
     public void createAppendEventConnectionWithTooManyEvents() {
         FakeStreamObserver<Confirmation> fakeStreamObserver = new FakeStreamObserver<>();
         StreamObserver<InputStream> connection = testSubject.createAppendEventConnection(SAMPLE_CONTEXT,
+                                                                                         null,
                                                                                          fakeStreamObserver);
         IntStream.range(0, 10).forEach(i -> connection
                 .onNext(new ByteArrayInputStream(Event.newBuilder().build().toByteArray())));
@@ -168,18 +172,11 @@ public class LocalEventStorageEngineTest {
     }
 
     @Test
-    public void listAggregateEvents() {
-    }
-
-    @Test
-    public void listAggregateSnapshots() {
-    }
-
-    @Test
     public void listEvents() throws InterruptedException {
         FakeStreamObserver<InputStream> fakeStreamObserver = new FakeStreamObserver<>();
         StreamObserver<GetEventsRequest> requestStreamObserver = testSubject.listEvents(
                 SAMPLE_CONTEXT,
+                null,
                 fakeStreamObserver);
         requestStreamObserver.onNext(GetEventsRequest.newBuilder()
                                                      .setTrackingToken(100)
@@ -192,106 +189,5 @@ public class LocalEventStorageEngineTest {
         assertWithin(2000, TimeUnit.MILLISECONDS, () -> assertEquals(20, fakeStreamObserver.values().size()));
 
         requestStreamObserver.onCompleted();
-    }
-
-    @Test
-    public void getFirstToken() {
-    }
-
-    @Test
-    public void getLastToken() {
-    }
-
-    @Test
-    public void getTokenAt() {
-    }
-
-    @Test
-    public void readHighestSequenceNr() {
-    }
-
-    @Test
-    public void queryEvents() {
-    }
-
-    @Test
-    public void isAutoStartup() {
-    }
-
-    @Test
-    public void checkHeartbeat() {
-
-    }
-
-    @Test
-    public void checkPermits() {
-    }
-
-    @Test
-    public void getLastToken1() {
-    }
-
-    @Test
-    public void getLastSnapshot() {
-    }
-
-    @Test
-    public void streamEventTransactions() {
-    }
-
-    @Test
-    public void streamSnapshotTransactions() {
-    }
-
-    @Test
-    public void syncEvents() {
-    }
-
-    @Test
-    public void syncSnapshots() {
-    }
-
-    @Test
-    public void getWaitingEventTransactions() {
-    }
-
-    @Test
-    public void getWaitingSnapshotTransactions() {
-    }
-
-    @Test
-    public void getLastCommittedToken() {
-    }
-
-    @Test
-    public void getLastCommittedSnapshot() {
-    }
-
-    @Test
-    public void rollbackEvents() {
-    }
-
-    @Test
-    public void rollbackSnapshots() {
-    }
-
-    @Test
-    public void getBackupFilenames() {
-    }
-
-    @Test
-    public void health() {
-    }
-
-    @Test
-    public void containsEvents() {
-    }
-
-    @Test
-    public void containsSnapshots() {
-    }
-
-    @Test
-    public void getLastCommitted() {
     }
 }

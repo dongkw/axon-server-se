@@ -13,6 +13,7 @@ import io.axoniq.axonserver.TestSystemInfoProvider;
 import io.axoniq.axonserver.applicationevents.SubscriptionEvents;
 import io.axoniq.axonserver.applicationevents.SubscriptionEvents.SubscribeCommand;
 import io.axoniq.axonserver.applicationevents.TopologyEvents;
+import io.axoniq.axonserver.config.GrpcContextAuthenticationProvider;
 import io.axoniq.axonserver.config.MessagingPlatformConfiguration;
 import io.axoniq.axonserver.exception.ErrorCode;
 import io.axoniq.axonserver.grpc.command.Command;
@@ -62,6 +63,7 @@ public class CommandServiceTest {
         testSubject = new CommandService(topology,
                                          commandDispatcher,
                                          () -> Topology.DEFAULT_CONTEXT,
+                                         () -> GrpcContextAuthenticationProvider.DEFAULT_PRINCIPAL,
                                          new DefaultClientIdRegistry(),
                                          eventPublisher,
                                          new DefaultInstructionAckSource<>(ack -> new SerializedCommandProviderInbound(
@@ -173,10 +175,11 @@ public class CommandServiceTest {
     @Test
     public void dispatch() {
         doAnswer(invocationOnMock -> {
-            Consumer<SerializedCommandResponse> responseConsumer= (Consumer<SerializedCommandResponse>) invocationOnMock.getArguments()[2];
+            Consumer<SerializedCommandResponse> responseConsumer = (Consumer<SerializedCommandResponse>) invocationOnMock
+                    .getArguments()[3];
             responseConsumer.accept(new SerializedCommandResponse(CommandResponse.newBuilder().build()));
             return null;
-        }).when(commandDispatcher).dispatch(any(), any(), any(), anyBoolean());
+        }).when(commandDispatcher).dispatch(any(), any(), any(), any());
         FakeStreamObserver<SerializedCommandResponse> responseObserver = new FakeStreamObserver<>();
         testSubject.dispatch(Command.newBuilder().build().toByteArray(), responseObserver);
         assertEquals(1, responseObserver.values().size());
@@ -196,7 +199,8 @@ public class CommandServiceTest {
 
     @Test
     public void disconnectClientStream() {
-        StreamObserver<CommandProviderOutbound> requestStream = testSubject.openStream(new FakeStreamObserver<>());
+        FakeStreamObserver<SerializedCommandProviderInbound> responseObserver = new FakeStreamObserver<>();
+        StreamObserver<CommandProviderOutbound> requestStream = testSubject.openStream(responseObserver);
         requestStream.onNext(CommandProviderOutbound.newBuilder()
                                                     .setSubscribe(CommandSubscription.newBuilder()
                                                                                      .setClientId(clientId)
@@ -211,7 +215,9 @@ public class CommandServiceTest {
         verify(eventPublisher).publishEvent(subscribe.capture());
         SubscribeCommand subscribeCommand = subscribe.getValue();
         ClientStreamIdentification streamIdentification = subscribeCommand.getHandler().getClientStreamIdentification();
-        testSubject.completeStream(clientId, streamIdentification);
+        testSubject.completeStreamForInactivity(clientId, streamIdentification);
         verify(eventPublisher).publishEvent(isA(TopologyEvents.CommandHandlerDisconnected.class));
+        assertEquals(1, responseObserver.errors().size());
+        assertTrue(responseObserver.errors().get(0).getMessage().contains("Command stream inactivity"));
     }
 }

@@ -66,10 +66,10 @@ public class StandardIndexEntriesSerializer implements Serializer<IndexEntries> 
     public IndexEntries deserialize(@Nonnull DataInput2 input, int available) throws IOException {
         int count = input.unpackInt();
         long sequenceNumber = input.unpackLong();
-        List<Integer> entryList = new ArrayList<>(count);
+        List<Integer> entries = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            entryList.add(input.unpackInt());
+            entries.add(input.unpackInt());
         }
-        return new StandardIndexEntries(sequenceNumber, entryList);
+        return new StandardIndexEntries(sequenceNumber, entries);
     }
 }

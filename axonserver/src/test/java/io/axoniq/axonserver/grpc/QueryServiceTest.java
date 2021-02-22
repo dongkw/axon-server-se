@@ -14,6 +14,7 @@ import io.axoniq.axonserver.TestSystemInfoProvider;
 import io.axoniq.axonserver.applicationevents.SubscriptionEvents;
 import io.axoniq.axonserver.applicationevents.SubscriptionEvents.SubscribeQuery;
 import io.axoniq.axonserver.applicationevents.TopologyEvents;
+import io.axoniq.axonserver.config.GrpcContextAuthenticationProvider;
 import io.axoniq.axonserver.config.MessagingPlatformConfiguration;
 import io.axoniq.axonserver.exception.ErrorCode;
 import io.axoniq.axonserver.grpc.query.QueryProviderInbound;
@@ -21,6 +22,7 @@ import io.axoniq.axonserver.grpc.query.QueryProviderOutbound;
 import io.axoniq.axonserver.grpc.query.QueryRequest;
 import io.axoniq.axonserver.grpc.query.QueryResponse;
 import io.axoniq.axonserver.grpc.query.QuerySubscription;
+import io.axoniq.axonserver.interceptor.NoOpSubscriptionQueryInterceptors;
 import io.axoniq.axonserver.message.ClientStreamIdentification;
 import io.axoniq.axonserver.message.FlowControlQueues;
 import io.axoniq.axonserver.message.query.QueryDispatcher;
@@ -61,7 +63,9 @@ public class QueryServiceTest {
         testSubject = new QueryService(topology,
                                        queryDispatcher,
                                        () -> Topology.DEFAULT_CONTEXT,
+                                       () -> GrpcContextAuthenticationProvider.DEFAULT_PRINCIPAL,
                                        new DefaultClientIdRegistry(),
+                                       new NoOpSubscriptionQueryInterceptors(),
                                        eventPublisher,
                                        new DefaultInstructionAckSource<>(ack -> QueryProviderInbound.newBuilder()
                                                                                                     .setAck(ack)
@@ -183,10 +187,10 @@ public class QueryServiceTest {
     @Test
     public void dispatch()  {
         doAnswer(invocationOnMock -> {
-            Consumer<QueryResponse> callback = (Consumer<QueryResponse>) invocationOnMock.getArguments()[1];
+            Consumer<QueryResponse> callback = (Consumer<QueryResponse>) invocationOnMock.getArguments()[2];
             callback.accept(QueryResponse.newBuilder().build());
             return null;
-        }).when(queryDispatcher).query(isA(SerializedQuery.class), isA(Consumer.class), any());
+        }).when(queryDispatcher).query(isA(SerializedQuery.class), any(), isA(Consumer.class), any());
         FakeStreamObserver<QueryResponse> responseObserver = new FakeStreamObserver<>();
         testSubject.query(QueryRequest.newBuilder().build(), responseObserver);
         assertEquals(1, responseObserver.values().size());
@@ -207,7 +211,8 @@ public class QueryServiceTest {
 
     @Test
     public void disconnectClientStream() {
-        StreamObserver<QueryProviderOutbound> requestStream = testSubject.openStream(new FakeStreamObserver<>());
+        FakeStreamObserver<QueryProviderInbound> responseObserver = new FakeStreamObserver<>();
+        StreamObserver<QueryProviderOutbound> requestStream = testSubject.openStream(responseObserver);
         requestStream.onNext(QueryProviderOutbound.newBuilder()
                                                   .setSubscribe(QuerySubscription.newBuilder()
                                                                                  .setClientId(clientId)
@@ -222,7 +227,9 @@ public class QueryServiceTest {
         verify(eventPublisher).publishEvent(subscribe.capture());
         SubscribeQuery subscribeQuery = subscribe.getValue();
         ClientStreamIdentification streamIdentification = subscribeQuery.clientIdentification();
-        testSubject.completeStream(clientId, streamIdentification);
+        testSubject.completeStreamForInactivity(clientId, streamIdentification);
         verify(eventPublisher).publishEvent(isA(TopologyEvents.QueryHandlerDisconnected.class));
+        assertEquals(1, responseObserver.errors().size());
+        assertTrue(responseObserver.errors().get(0).getMessage().contains("Query stream inactivity"));
     }
 }

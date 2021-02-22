@@ -12,11 +12,13 @@ package io.axoniq.axonserver.grpc;
 import io.axoniq.axonserver.applicationevents.SubscriptionEvents.SubscribeCommand;
 import io.axoniq.axonserver.applicationevents.SubscriptionEvents.UnsubscribeCommand;
 import io.axoniq.axonserver.applicationevents.TopologyEvents.CommandHandlerDisconnected;
+import io.axoniq.axonserver.config.AuthenticationProvider;
 import io.axoniq.axonserver.exception.ErrorCode;
 import io.axoniq.axonserver.exception.ExceptionUtils;
 import io.axoniq.axonserver.grpc.command.CommandProviderOutbound;
 import io.axoniq.axonserver.grpc.command.CommandServiceGrpc;
 import io.axoniq.axonserver.grpc.command.CommandSubscription;
+import io.axoniq.axonserver.grpc.heartbeat.ApplicationInactivityException;
 import io.axoniq.axonserver.message.ByteArrayMarshaller;
 import io.axoniq.axonserver.message.ClientStreamIdentification;
 import io.axoniq.axonserver.message.command.CommandDispatcher;
@@ -75,6 +77,7 @@ public class CommandService implements AxonServerClientService {
     private final Topology topology;
     private final CommandDispatcher commandDispatcher;
     private final ContextProvider contextProvider;
+    private final AuthenticationProvider authenticationProvider;
     private final ClientIdRegistry clientIdRegistry;
     private final ApplicationEventPublisher eventPublisher;
     private final Logger logger = LoggerFactory.getLogger(CommandService.class);
@@ -87,6 +90,7 @@ public class CommandService implements AxonServerClientService {
     public CommandService(Topology topology,
                           CommandDispatcher commandDispatcher,
                           ContextProvider contextProvider,
+                          AuthenticationProvider authenticationProvider,
                           ClientIdRegistry clientIdRegistry,
                           ApplicationEventPublisher eventPublisher,
                           @Qualifier("commandInstructionAckSource")
@@ -94,6 +98,7 @@ public class CommandService implements AxonServerClientService {
         this.topology = topology;
         this.commandDispatcher = commandDispatcher;
         this.contextProvider = contextProvider;
+        this.authenticationProvider = authenticationProvider;
         this.clientIdRegistry = clientIdRegistry;
         this.eventPublisher = eventPublisher;
         this.instructionAckSource = instructionAckSource;
@@ -267,10 +272,12 @@ public class CommandService implements AxonServerClientService {
             logger.trace("{}: Received command: {}", clientId, request.wrapped().getName());
         }
         try {
-            commandDispatcher.dispatch(contextProvider.getContext(), request, commandResponse -> safeReply(clientId,
-                                                                                                           commandResponse,
-                                                                                                           responseObserver),
-                                       false);
+            commandDispatcher.dispatch(contextProvider.getContext(),
+                                       authenticationProvider.get(),
+                                       request,
+                                       commandResponse -> safeReply(clientId,
+                                                                    commandResponse,
+                                                                    responseObserver));
         } catch (Exception ex) {
             logger.warn("Dispatching failed with unexpected error", ex);
             responseObserver.onError(GrpcExceptionBuilder.build(ex));
@@ -293,9 +300,11 @@ public class CommandService implements AxonServerClientService {
      * @param clientId                   the unique identifier of the client instance
      * @param clientStreamIdentification the unique identifier of the command stream
      */
-    public void completeStream(String clientId, ClientStreamIdentification clientStreamIdentification) {
+    public void completeStreamForInactivity(String clientId, ClientStreamIdentification clientStreamIdentification) {
         if (dispatcherListeners.containsKey(clientStreamIdentification)) {
-            dispatcherListeners.remove(clientStreamIdentification).cancelAndCompleteStream();
+            String message = "Command stream inactivity for " + clientStreamIdentification.getClientStreamId();
+            ApplicationInactivityException exception = new ApplicationInactivityException(message);
+            dispatcherListeners.remove(clientStreamIdentification).cancelAndCompleteStreamExceptionally(exception);
             logger.debug("Command Stream closed for client: {}", clientStreamIdentification);
             eventPublisher.publishEvent(new CommandHandlerDisconnected(clientStreamIdentification.getContext(),
                                                                        clientId,
